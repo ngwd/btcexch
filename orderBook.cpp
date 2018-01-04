@@ -23,15 +23,14 @@ enum class side {
     sell = 's',
     none = 'n'
 };
-using ordid = int;
-using price = long;  // the price contains 2 fixed decimal, so we 
-                     // multiply all price with 100 to avoid float computing 
+using ordid  = int;
+using price  = long;  
+using volume = long;
+using type   = char;
 struct compare_factor {price p;ordid o;};  // price, ordid
 using cmpfct = struct compare_factor;
-
-using volume = long;
-using type = char;
-
+struct match_record   {ordid taker; ordid maker; volume v; price p;};
+class OpenBooks;
 class Order {
 public:
     explicit Order(ordtype t = ordtype::limit, 
@@ -39,63 +38,39 @@ public:
                    volume v  = 0L, 
                    price  p  = 0L) noexcept:
         _o(_id++), _t(t), _s(s), _v(v), _p(p){}
+    inline ordid   getOrdid()    const {return _o;}
+    inline volume  getQuantity() const {return _v;}
+    inline price   getPrice()    const {return _p;}
+    inline ordtype getType()     const {return _t;}
+    inline void    setQuantity(volume v) {_v =v;}
+    virtual bool   canMatch(OpenBooks&){}
+    virtual void   transform(){}
     friend std::ostream& operator << (std::ostream& os, const Order& o);
-    virtual void execute(OpenBooks&){};
-    virtual void deposit(){};
 private:
     static int   _id;
-    const ordid   _o;             // order number 
-    const ordtype _t;
-    const side    _s; 
-    const volume  _v;
-    const price   _p;
+    const   ordid   _o;             // order number 
+protected:
+    mutable ordtype _t;
+    mutable price   _p;
+    const   side    _s; 
+    mutable volume  _v;
+    side _getOpposingSide() const; 
 };
 int Order::_id = 1;
-class LimitOrder:public Order{
-public:
-    LimitOrder(ordtype o, side s, volume v, price p):
-        Order(o, s, v, p){}
-    virtual void execute(OpenBooks&); 
-    virtual void deposit(){};
-};
 
-class MarketOrder:public Order{
-public:
-    MarketOrder(ordtype o, side s, volume v, price p):
-        Order(o, s, v, p){}
-    virtual void execute(OpenBooks&){std::cout<<"m\n";};
-    virtual void deposit(){};
-};
-class StopOrder:public Order{
-public:
-    StopOrder(ordtype o, side s, volume v, price p):
-        Order(o, s, v, p){}
-    virtual void execute(OpenBooks&){std::cout<<"s\n";};
-    virtual void deposit(){};
-};
-class CancelOrder:public Order{
-public:
-    CancelOrder(ordtype o, side s, volume v, price p):
-        Order(o, s, v, p){}
-    virtual void execute(OpenBooks&){std::cout<<"c\n";};
-    virtual void deposit(){};
-};
-LimitOrder::execute(OpenBooks& ob) {
-         
-}
 class OpenBooks {
 public:
     OpenBooks();
-    bool recvOrder(ordtype, side, volume, price);
-    bool processOrder();
+    bool   recvOrder(ordtype, side, volume, price);
+    void   processOrder();
+    price  getMarketPrice(side)const;
+    bool   marketExist(side) const ;
 private:
     // std::function<bool(const cmpfct l, const cmpfct r)> _cmp[2];
     std::function<bool(const cmpfct l, const cmpfct r)> _cmp_s; 
     std::function<bool(const cmpfct l, const cmpfct r)> _cmp_b; 
 
-    int buy = static_cast<int>(Side::buy); 
-    int sell= static_cast<int>(Side::sell);
-
+    side _s;  // current order process is buy side or sell side
     std::priority_queue<cmpfct, std::vector<cmpfct>, 
         decltype(_cmp_b)>  _limit_order_b;
     std::priority_queue<cmpfct, std::vector<cmpfct>, 
@@ -103,17 +78,75 @@ private:
 
     std::vector<Order>                _orders;
     std::map<price, ordid>            _stop_order  [2];
-    std::set<ordid>                   _cancel_order[2];
+    std::set<ordid>                   _cancel_order;
     std::vector<ordid>                _market_order[2];
     Order *                           _pOrder;
+    std::vector<match_record>         _matches;
+
     Order* _createOrder(ordtype, side, volume, price);
+    void   _execute(Order*, ordtype t);
 };
+
+side Order::_getOpposingSide() const {
+    if (_s==side::none) 
+        return _s;
+    else 
+        return _s==side::buy?side::sell:side::buy;
+}
+class LimitOrder:public Order{
+public:
+    LimitOrder(ordtype o, side s, volume v, price p):
+        Order(o, s, v, p){}
+    virtual bool canMatch(OpenBooks&);
+};
+
+class MarketOrder:public Order{
+public:
+    MarketOrder(ordtype o, side s, volume v, price p):
+        Order(o, s, v, p){}
+    virtual bool canMatch(OpenBooks&);
+};
+class StopOrder:public Order{
+public:
+    StopOrder(ordtype o, side s, volume v, price p):
+        Order(o, s, v, p){}
+    virtual bool canMatch(OpenBooks&);
+    virtual void transform(){
+        _t = ordtype::market;
+        _p = 0;
+    }
+};
+class CancelOrder:public Order{
+public:
+    CancelOrder(ordtype o, side s, volume v, price p):
+        Order(o, s, v, p){}
+};
+
+bool LimitOrder::canMatch(OpenBooks& ob) {
+    side s = _getOpposingSide();
+    price opp_p = ob.getMarketPrice(s);
+    return _v > 0 &&    // volume should > 0 
+           ob.marketExist(s) &&  
+          (_s==side::sell && _p<=ob.getMarketPrice(s)|| 
+           _s==side::buy  && _p>=ob.getMarketPrice(s));
+}
+bool MarketOrder::canMatch(OpenBooks& ob) {
+    side s = _getOpposingSide();
+    return _v > 0 &&    // volume should > 0 
+           !ob.marketExist(s);  
+}
+bool StopOrder::canMatch(OpenBooks& ob) {
+    side s = _getOpposingSide();
+    return _v > 0 &&
+           ob.marketExist(s) && 
+           (_s==side::sell && _p>=ob.getMarketPrice(s)||
+            _s==side::buy  && _p<=ob.getMarketPrice(s));
+}
 
 OpenBooks::OpenBooks() {
     _pOrder = nullptr;
     _orders.reserve(64);
-    int buy = static_cast<int>(Side::buy);
-    int sell= static_cast<int>(Side::sell);
+    _matches.reserve(64);
 
     //_cmp[buy]  = [](cmpfct l, cmpfct r){
     _cmp_b = [](cmpfct l, cmpfct r){
@@ -128,13 +161,91 @@ bool OpenBooks::recvOrder(ordtype t, side s, volume v, price p) {
     _pOrder = _createOrder(t, s, v, p);
     if (_pOrder==nullptr) return false;
     _orders.push_back(*_pOrder);  // deposit
+    _s = s;                       // buy side or sell side
     return true;
 }
 
-bool OpenBooks::processOrder() {
-    if (_pOrder==nullptr) return false;
-    _pOrder.execute(*this); 
+void OpenBooks::processOrder() {
+    ordtype t = _pOrder->getType(); 
+    switch(t) {
+    case ordtype::limit:
+    case ordtype::market:
+        while (_pOrder->canMatch(*this)) // continuous matching
+            _execute(_pOrder, t); 
+        if (_pOrder->getQuantity()) {
+            //_deposit(_pOrder);
+        }
+        break;
+    case ordtype::stop:
+        if (_pOrder->canMatch(*this)) { 
+            _pOrder->transform();  // transform to market order
+            this->processOrder();
+        } 
+        break;
+    case ordtype::cancel:
+        _execute(_pOrder, t);
+        break;
+    }
 }
+void OpenBooks::_execute(Order* pOrder, ordtype t) {
+    switch(t) {
+        case ordtype::limit:
+        case ordtype::market:
+        {
+            auto& pq; //priority queue
+            if (_s==side::buy) pq = &_limit_order_s;
+            else pq = &_limit_order_b;
+
+            ordid matched_o = pq.top().o;
+
+            if (_cancel_order.find(matched_o)!=_cancel_order.end()){
+                // this order should not have been canceled
+                pq.pop();
+                matched_o = pq.top().o;
+            }
+            price  matched_pri = _orders[matched_o].getPrice();
+            volume matched_qty = _orders[matched_o].getQuantity(); 
+            volume qty = pOrder->getQuantity();
+            if (matched_qty > qty){
+                _matches.push_back({pOrder->getOrdid(), matched_o, 
+                                    qty, matched_pri}); 
+                pOrder->setQuantity(0);
+                _orders[matched_o].setQuantity(matched_qty-qty);
+            }
+            else {
+                _matches.push_back({pOrder->getOrdid(), matched_o, 
+                                    matched_qty, matched_pri}); 
+                pOrder->setQuantity(qty-matched_qty);
+                pq.pop();
+            }
+        }
+        break;
+        case ordtype::cancel:
+        { 
+            ordid co = _pOrder->getQuantity();//for cancel order, this is 
+                                              // the order will be canceled
+            if (_pOrder->getOrdid()<co) {
+                std::cerr << "error cancel unexist order"<<std::endl;
+                return;
+            }
+            _cancel_order.insert(co);
+        }
+        break;
+        case ordtype::stop:
+        break;
+    }
+}
+price OpenBooks::getMarketPrice(side s)const {
+    if (s==side::buy) auto pq = &_limit_order_b;
+    else auto pq = &_limit_order_s;
+    return pq.top().p;
+}
+bool OpenBooks::marketExist(side s) const {
+    if (s==side::buy) auto pq = &_limit_order_b;
+    else auto pq = &_limit_order_s;
+    return !pq.empty();
+}
+
 Order* OpenBooks::_createOrder(ordtype t, side s, volume v, price p) {
     switch (t) {
         case ordtype::limit :return new LimitOrder (t, s, v, p);
@@ -170,8 +281,7 @@ std::ostream& operator<<(std::ostream& os, const Order& o) {
     return os;
 }
 
-bool parseLine(const std::string & line, OpenBooks & exch)
-{
+bool parseLine(const std::string & line, OpenBooks & exch) {
     char ordtyp[8]  = {0x0};
     char sidestr[8] = {0x0};
     long vol        = 0L;
@@ -189,9 +299,8 @@ bool parseLine(const std::string & line, OpenBooks & exch)
              vol, 
              iprice*100+dprice))  // to avoid floating operation 
         std::cerr << "error when recvOrder"<<std::endl;
-    if (!exch.processOrder())
-        std::cerr << "error when processOrder"<<std::endl;
-   
+    exch.processOrder();
+    return true;
 }
 
 int main(int argc, char * argv[])
