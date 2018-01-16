@@ -369,6 +369,28 @@ spo OpenBooks::_createOrder(ordtype t, side s, volume v, price p) {
     }
     return nullptr; 
 }
+inline char* const side2str(side s) {
+    switch (s){
+        case side::buy:  return (char*)"buy";
+        case side::sell: return (char*)"sell";
+        default: return (char*)"na";
+    }
+}
+inline char* const ordtype2str(ordtype t) {
+    switch (t){
+        case ordtype::limit: return (char*)"limit";
+        case ordtype::market:return (char*)"market";
+        case ordtype::stop:  return (char*)"stop";
+        case ordtype::cancel:return (char*)"cancel";
+    }
+    return (char*)"na";
+}
+std::ostream& operator<<(std::ostream& os, const Order& o) {
+    os<<o._o<<" " << ordtype2str(o._t)<<" "<<side2str(o._s)<<" "
+      <<o._v<<" "<<(long)(o._p/100) << "."
+      << std::setfill('0') << std::setw(2) << (int)(o._p%100);
+    return os;
+}
 
 bool parseLine(const std::string & line, OpenBooks & exch) {
     char ordtyp[8]  = {0x0};
@@ -405,7 +427,7 @@ int main(int argc, char * argv[]) {
             return 1;
         }
     }
-    // print the final matches
+    // print
     for(auto v : exch._matches) 
         std::cout<<"match " << v.taker << " " <<v.maker << " " 
                  <<v.v << " " 
